@@ -20,21 +20,31 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import java.util.concurrent.TimeUnit;
+
 import ghidra.program.model.address.Address;
+import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.util.task.TaskMonitor;
+import ghidra.util.task.TimeoutTaskMonitor;
 import io.modelcontextprotocol.server.McpSyncServer;
 import io.modelcontextprotocol.spec.McpSchema;
 import reva.tools.AbstractToolProvider;
+import reva.util.AddressUtil;
 import reva.util.MemoryUtil;
 import reva.util.SchemaUtil;
 
 /**
  * Tool provider for memory-related operations.
- * Provides tools to list memory blocks and read memory content.
+ * Provides tools to list memory blocks, read memory content, and search for byte patterns.
  */
 public class MemoryToolProvider extends AbstractToolProvider {
+
+    private static final int DEFAULT_MAX_RESULTS = 100;
+    private static final int MAX_RESULTS_LIMIT = 10000;
+    private static final int DEFAULT_TIMEOUT_SECONDS = 120;
 
     /**
      * Constructor
@@ -48,6 +58,7 @@ public class MemoryToolProvider extends AbstractToolProvider {
     public void registerTools() {
         registerMemoryBlocksTool();
         registerReadMemoryTool();
+        registerSearchMemoryTool();
     }
 
     /**
@@ -155,6 +166,172 @@ public class MemoryToolProvider extends AbstractToolProvider {
             }
 
             return createJsonResult(result);
+        });
+    }
+
+    /**
+     * Register a tool to search memory for byte patterns
+     */
+    private void registerSearchMemoryTool() {
+        Map<String, Object> properties = new HashMap<>();
+        properties.put("programPath", SchemaUtil.stringProperty("Path to the program in the Ghidra Project"));
+        properties.put("pattern", SchemaUtil.stringProperty(
+            "Hex byte pattern to search for. Space-separated or concatenated. " +
+            "Use '??' for wildcard bytes. Examples: '4D 5A 90 00', '4D5A??00'"));
+        properties.put("startAddress", SchemaUtil.stringProperty(
+            "Address or symbol to start searching from (default: program minimum address)"));
+        properties.put("endAddress", SchemaUtil.stringProperty(
+            "Address or symbol to stop searching at (default: program maximum address)"));
+        properties.put("blockName", SchemaUtil.stringProperty(
+            "Restrict search to a specific memory block by name"));
+        properties.put("maxResults", SchemaUtil.integerPropertyWithDefault(
+            "Maximum number of results to return", DEFAULT_MAX_RESULTS));
+        properties.put("alignment", SchemaUtil.integerPropertyWithDefault(
+            "Byte alignment for search (1 = every byte, 4 = dword-aligned, etc.)", 1));
+
+        List<String> required = List.of("programPath", "pattern");
+
+        McpSchema.Tool tool = McpSchema.Tool.builder()
+            .name("search-memory")
+            .title("Search Memory")
+            .description("Search program memory for a hex byte pattern. Supports wildcard bytes " +
+                "with '??'. Useful for finding byte signatures, magic values, strings, or " +
+                "specific instruction sequences.")
+            .inputSchema(createSchema(properties, required))
+            .build();
+
+        super.registerTool(tool, (exchange, request) -> {
+            Program program = getProgramFromArgs(request);
+            String patternStr = getString(request, "pattern");
+
+            // Parse the hex pattern
+            MemoryUtil.HexPattern hexPattern;
+            try {
+                hexPattern = MemoryUtil.parseHexPattern(patternStr);
+            } catch (IllegalArgumentException e) {
+                return createErrorResult("Invalid hex pattern: " + e.getMessage());
+            }
+
+            int maxResults = getOptionalInt(request, "maxResults", DEFAULT_MAX_RESULTS);
+            if (maxResults <= 0) {
+                maxResults = DEFAULT_MAX_RESULTS;
+            }
+            maxResults = Math.min(maxResults, MAX_RESULTS_LIMIT);
+
+            int alignment = getOptionalInt(request, "alignment", 1);
+            if (alignment <= 0) {
+                return createErrorResult("Alignment must be a positive integer, got: " + alignment);
+            }
+
+            // Determine search address range
+            Memory memory = program.getMemory();
+            Address searchStart;
+            Address searchEnd;
+
+            String blockName = getOptionalString(request, "blockName", null);
+            if (blockName != null && !blockName.isEmpty()) {
+                // Restrict to a specific memory block
+                MemoryBlock block = MemoryUtil.findBlockByName(program, blockName);
+                if (block == null) {
+                    return createErrorResult("Memory block not found: " + blockName);
+                }
+                searchStart = block.getStart();
+                searchEnd = block.getEnd();
+            } else {
+                // Use explicit start/end or full program range
+                String startStr = getOptionalString(request, "startAddress", null);
+                String endStr = getOptionalString(request, "endAddress", null);
+
+                searchStart = (startStr != null && !startStr.isEmpty())
+                    ? AddressUtil.resolveAddressOrSymbol(program, startStr)
+                    : program.getMinAddress();
+                searchEnd = (endStr != null && !endStr.isEmpty())
+                    ? AddressUtil.resolveAddressOrSymbol(program, endStr)
+                    : program.getMaxAddress();
+
+                if (searchStart == null) {
+                    return createErrorResult("Invalid start address or symbol: " + startStr);
+                }
+                if (searchEnd == null) {
+                    return createErrorResult("Invalid end address or symbol: " + endStr);
+                }
+            }
+
+            // Search for the pattern using TaskMonitor for timeout protection
+            TaskMonitor monitor = TimeoutTaskMonitor.timeoutIn(
+                DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            List<Map<String, Object>> results = new ArrayList<>();
+            Address currentAddr = searchStart;
+            int patternLength = hexPattern.bytes().length;
+
+            while (results.size() < maxResults) {
+                Address found = memory.findBytes(currentAddr,
+                    hexPattern.bytes(), hexPattern.masks(), true, monitor);
+
+                if (found == null) {
+                    break;
+                }
+
+                // Check if the found address is past our end boundary
+                if (found.compareTo(searchEnd) > 0) {
+                    break;
+                }
+
+                // Check alignment
+                if (alignment > 1) {
+                    long offset = found.getOffset();
+                    if (offset % alignment != 0) {
+                        // Skip to next aligned address and continue searching
+                        try {
+                            long nextAligned = ((offset / alignment) + 1) * alignment;
+                            currentAddr = found.getNewAddress(nextAligned);
+                        } catch (Exception e) {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
+                Map<String, Object> matchResult = new HashMap<>();
+                matchResult.put("address", AddressUtil.formatAddress(found));
+
+                // Read the actual matched bytes
+                byte[] matchedBytes = MemoryUtil.readMemoryBytes(program, found, patternLength);
+                if (matchedBytes != null) {
+                    matchResult.put("matchedBytes", MemoryUtil.formatHexString(matchedBytes));
+                }
+
+                // Include memory block info
+                MemoryBlock containingBlock = memory.getBlock(found);
+                if (containingBlock != null) {
+                    matchResult.put("blockName", containingBlock.getName());
+                }
+
+                // Include function context if available
+                Function func = program.getFunctionManager().getFunctionContaining(found);
+                if (func != null) {
+                    matchResult.put("function", func.getName());
+                    matchResult.put("functionAddress", AddressUtil.formatAddress(func.getEntryPoint()));
+                }
+
+                results.add(matchResult);
+
+                // Advance past this match
+                try {
+                    currentAddr = found.add(alignment > 1 ? alignment : 1);
+                } catch (Exception e) {
+                    break; // Address overflow, we've reached the end
+                }
+            }
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("programPath", program.getDomainFile().getPathname());
+            response.put("pattern", patternStr);
+            response.put("resultCount", results.size());
+            response.put("truncated", results.size() >= maxResults);
+            response.put("results", results);
+
+            return createJsonResult(response);
         });
     }
 

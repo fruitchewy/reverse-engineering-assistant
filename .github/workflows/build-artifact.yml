@@ -1,0 +1,39 @@
+name: Build Extension Artifact
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Extension
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Set up Java
+      uses: actions/setup-java@v5
+      with:
+        java-version: "21"
+        distribution: "microsoft"
+
+    - name: Install Ghidra
+      uses: antoniovazquezblanco/setup-ghidra@v2.0.18
+      with:
+        version: "12.0"
+        auth_token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build Extension
+      run: gradle buildExtension
+
+    - name: Upload Extension
+      uses: actions/upload-artifact@v6
+      with:
+        name: reva-extension
+        path: dist/
+        if-no-files-found: error
+        retention-days: 30
