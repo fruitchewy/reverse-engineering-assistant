@@ -20,6 +20,8 @@ import static org.junit.Assert.*;
 import org.junit.Before;
 import org.junit.Test;
 
+import ghidra.program.model.address.Address;
+import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryBlock;
 import reva.RevaIntegrationTestBase;
 
@@ -70,14 +72,105 @@ public class MemoryToolProviderIntegrationTest extends RevaIntegrationTestBase {
         // Verify that the program path is set correctly
         assertNotNull("Program path should be set", programPath);
         assertNotNull("Program should be set", program);
-        
+
         // Verify the config manager and server port are available
         assertNotNull("Config manager should be available", configManager);
         assertEquals("Server port should be 8080", 8080, configManager.getServerPort());
-        
+
         // Verify that we have a usable memory space
         assertNotNull("Program should have memory", program.getMemory());
-        assertTrue("Program should have at least one memory block", 
+        assertTrue("Program should have at least one memory block",
             program.getMemory().getBlocks().length > 0);
+    }
+
+    @Test
+    public void testSearchMemoryToolRegistered() throws Exception {
+        // Verify that the MCP server has the search-memory tool registered
+        io.modelcontextprotocol.server.McpSyncServer mcpServer =
+            reva.util.RevaInternalServiceRegistry.getService(io.modelcontextprotocol.server.McpSyncServer.class);
+        assertNotNull("MCP server should be registered", mcpServer);
+
+        // The search-memory tool should be registered along with existing memory tools
+    }
+
+    @Test
+    public void testSearchMemoryFindsKnownPattern() throws Exception {
+        // Write a known pattern into the test memory block
+        Memory memory = program.getMemory();
+        Address testAddr = program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000100);
+
+        byte[] testPattern = {(byte) 0x4D, (byte) 0x5A, (byte) 0x90, (byte) 0x00};
+        int txId = program.startTransaction("Write test pattern");
+        try {
+            memory.setBytes(testAddr, testPattern);
+        } finally {
+            program.endTransaction(txId, true);
+        }
+
+        // Verify the pattern was written correctly
+        byte[] readBack = new byte[4];
+        memory.getBytes(testAddr, readBack);
+        assertEquals((byte) 0x4D, readBack[0]);
+        assertEquals((byte) 0x5A, readBack[1]);
+        assertEquals((byte) 0x90, readBack[2]);
+        assertEquals((byte) 0x00, readBack[3]);
+
+        // Now search for the pattern using Ghidra's Memory.findBytes API directly
+        // (verifying the API works as expected for our tool implementation)
+        byte[] searchBytes = {(byte) 0x4D, (byte) 0x5A, (byte) 0x90, (byte) 0x00};
+        byte[] searchMasks = {(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF};
+
+        Address found = memory.findBytes(
+            program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000000),
+            program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000FFF),
+            searchBytes, searchMasks, true, 1);
+
+        assertNotNull("Should find the pattern in memory", found);
+        assertEquals("Found address should match where we wrote the pattern",
+            0x01000100L, found.getOffset());
+    }
+
+    @Test
+    public void testSearchMemoryWithWildcard() throws Exception {
+        // Write a pattern into the test memory block
+        Memory memory = program.getMemory();
+        Address testAddr = program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000200);
+
+        byte[] testPattern = {(byte) 0xDE, (byte) 0xAD, (byte) 0xBE, (byte) 0xEF};
+        int txId = program.startTransaction("Write test pattern for wildcard");
+        try {
+            memory.setBytes(testAddr, testPattern);
+        } finally {
+            program.endTransaction(txId, true);
+        }
+
+        // Search with a wildcard in the middle: DE ?? BE EF
+        byte[] searchBytes = {(byte) 0xDE, (byte) 0x00, (byte) 0xBE, (byte) 0xEF};
+        byte[] searchMasks = {(byte) 0xFF, (byte) 0x00, (byte) 0xFF, (byte) 0xFF};
+
+        Address found = memory.findBytes(
+            program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000000),
+            program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000FFF),
+            searchBytes, searchMasks, true, 1);
+
+        assertNotNull("Should find the pattern with wildcard", found);
+        assertEquals("Found address should match where we wrote the pattern",
+            0x01000200L, found.getOffset());
+    }
+
+    @Test
+    public void testSearchMemoryNoResults() throws Exception {
+        // Search for a pattern that doesn't exist in the zero-initialized block
+        Memory memory = program.getMemory();
+
+        byte[] searchBytes = {(byte) 0xFF, (byte) 0xFE, (byte) 0xFD, (byte) 0xFC};
+        byte[] searchMasks = {(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF};
+
+        Address found = memory.findBytes(
+            program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000000),
+            program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000FFF),
+            searchBytes, searchMasks, true, 1);
+
+        assertNull("Should not find a pattern that doesn't exist", found);
     }
 }

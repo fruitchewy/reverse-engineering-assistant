@@ -116,6 +116,63 @@ public class MemoryUtil {
     }
 
     /**
+     * Parsed hex pattern with data bytes and mask bytes for use with Memory.findBytes().
+     * @param bytes The data bytes to search for
+     * @param masks The mask bytes (0xFF = exact match, 0x00 = wildcard)
+     */
+    public record HexPattern(byte[] bytes, byte[] masks) {}
+
+    /**
+     * Parse a hex pattern string into bytes and mask arrays for memory searching.
+     * Supports space-separated ("4D 5A 90 00") and concatenated ("4D5A9000") formats.
+     * Use "??" for wildcard bytes that match anything.
+     *
+     * @param pattern The hex pattern string
+     * @return A HexPattern with bytes and masks arrays
+     * @throws IllegalArgumentException if the pattern is null, empty, or contains invalid hex
+     */
+    public static HexPattern parseHexPattern(String pattern) {
+        if (pattern == null || pattern.trim().isEmpty()) {
+            throw new IllegalArgumentException("Hex pattern must not be null or empty");
+        }
+
+        // Normalize: remove all whitespace and convert to uppercase
+        String normalized = pattern.replaceAll("\\s+", "").toUpperCase();
+
+        if (normalized.length() % 2 != 0) {
+            throw new IllegalArgumentException(
+                "Hex pattern must have an even number of characters, got: " + normalized.length());
+        }
+
+        if (normalized.isEmpty()) {
+            throw new IllegalArgumentException("Hex pattern must not be empty");
+        }
+
+        int byteCount = normalized.length() / 2;
+        byte[] bytes = new byte[byteCount];
+        byte[] masks = new byte[byteCount];
+
+        for (int i = 0; i < byteCount; i++) {
+            String token = normalized.substring(i * 2, i * 2 + 2);
+
+            if ("??".equals(token)) {
+                bytes[i] = 0x00;
+                masks[i] = 0x00;
+            } else {
+                try {
+                    bytes[i] = (byte) Integer.parseInt(token, 16);
+                    masks[i] = (byte) 0xFF;
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(
+                        "Invalid hex byte '" + token + "' at position " + i + " in pattern");
+                }
+            }
+        }
+
+        return new HexPattern(bytes, masks);
+    }
+
+    /**
      * Process memory bytes in chunks to avoid large memory allocations
      * @param program The Ghidra program
      * @param startAddress Starting address
