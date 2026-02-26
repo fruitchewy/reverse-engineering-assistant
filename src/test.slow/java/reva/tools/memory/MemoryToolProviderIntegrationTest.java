@@ -23,6 +23,7 @@ import org.junit.Test;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.util.task.TaskMonitor;
 import reva.RevaIntegrationTestBase;
 
 /**
@@ -120,10 +121,9 @@ public class MemoryToolProviderIntegrationTest extends RevaIntegrationTestBase {
         byte[] searchBytes = {(byte) 0x4D, (byte) 0x5A, (byte) 0x90, (byte) 0x00};
         byte[] searchMasks = {(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF};
 
-        Address found = memory.findBytes(
-            program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000000),
-            program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000FFF),
-            searchBytes, searchMasks, true, 1);
+        Address searchStart = program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000000);
+        Address found = memory.findBytes(searchStart,
+            searchBytes, searchMasks, true, TaskMonitor.DUMMY);
 
         assertNotNull("Should find the pattern in memory", found);
         assertEquals("Found address should match where we wrote the pattern",
@@ -148,10 +148,9 @@ public class MemoryToolProviderIntegrationTest extends RevaIntegrationTestBase {
         byte[] searchBytes = {(byte) 0xDE, (byte) 0x00, (byte) 0xBE, (byte) 0xEF};
         byte[] searchMasks = {(byte) 0xFF, (byte) 0x00, (byte) 0xFF, (byte) 0xFF};
 
-        Address found = memory.findBytes(
-            program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000000),
-            program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000FFF),
-            searchBytes, searchMasks, true, 1);
+        Address searchStart = program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000000);
+        Address found = memory.findBytes(searchStart,
+            searchBytes, searchMasks, true, TaskMonitor.DUMMY);
 
         assertNotNull("Should find the pattern with wildcard", found);
         assertEquals("Found address should match where we wrote the pattern",
@@ -166,10 +165,9 @@ public class MemoryToolProviderIntegrationTest extends RevaIntegrationTestBase {
         byte[] searchBytes = {(byte) 0xFF, (byte) 0xFE, (byte) 0xFD, (byte) 0xFC};
         byte[] searchMasks = {(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF};
 
-        Address found = memory.findBytes(
-            program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000000),
-            program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000FFF),
-            searchBytes, searchMasks, true, 1);
+        Address searchStart = program.getAddressFactory().getDefaultAddressSpace().getAddress(0x01000000);
+        Address found = memory.findBytes(searchStart,
+            searchBytes, searchMasks, true, TaskMonitor.DUMMY);
 
         assertNull("Should not find a pattern that doesn't exist", found);
     }

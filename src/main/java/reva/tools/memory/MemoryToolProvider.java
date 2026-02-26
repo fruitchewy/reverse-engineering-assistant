@@ -20,11 +20,15 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import java.util.concurrent.TimeUnit;
+
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.util.task.TaskMonitor;
+import ghidra.util.task.TimeoutTaskMonitor;
 import io.modelcontextprotocol.server.McpSyncServer;
 import io.modelcontextprotocol.spec.McpSchema;
 import reva.tools.AbstractToolProvider;
@@ -40,6 +44,7 @@ public class MemoryToolProvider extends AbstractToolProvider {
 
     private static final int DEFAULT_MAX_RESULTS = 100;
     private static final int MAX_RESULTS_LIMIT = 10000;
+    private static final int DEFAULT_TIMEOUT_SECONDS = 120;
 
     /**
      * Constructor
@@ -252,17 +257,39 @@ public class MemoryToolProvider extends AbstractToolProvider {
                 }
             }
 
-            // Search for the pattern
+            // Search for the pattern using TaskMonitor for timeout protection
+            TaskMonitor monitor = TimeoutTaskMonitor.timeoutIn(
+                DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             List<Map<String, Object>> results = new ArrayList<>();
             Address currentAddr = searchStart;
             int patternLength = hexPattern.bytes().length;
 
             while (results.size() < maxResults) {
-                Address found = memory.findBytes(currentAddr, searchEnd,
-                    hexPattern.bytes(), hexPattern.masks(), true, alignment);
+                Address found = memory.findBytes(currentAddr,
+                    hexPattern.bytes(), hexPattern.masks(), true, monitor);
 
                 if (found == null) {
                     break;
+                }
+
+                // Check if the found address is past our end boundary
+                if (found.compareTo(searchEnd) > 0) {
+                    break;
+                }
+
+                // Check alignment
+                if (alignment > 1) {
+                    long offset = found.getOffset();
+                    if (offset % alignment != 0) {
+                        // Skip to next aligned address and continue searching
+                        try {
+                            long nextAligned = ((offset / alignment) + 1) * alignment;
+                            currentAddr = found.getNewAddress(nextAligned);
+                        } catch (Exception e) {
+                            break;
+                        }
+                        continue;
+                    }
                 }
 
                 Map<String, Object> matchResult = new HashMap<>();
@@ -291,7 +318,7 @@ public class MemoryToolProvider extends AbstractToolProvider {
 
                 // Advance past this match
                 try {
-                    currentAddr = found.add(1);
+                    currentAddr = found.add(alignment > 1 ? alignment : 1);
                 } catch (Exception e) {
                     break; // Address overflow, we've reached the end
                 }
